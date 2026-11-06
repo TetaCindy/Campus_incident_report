@@ -1,0 +1,44 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Only verified ALU accounts may touch any data.
+    function aluEmail() {
+      return request.auth.token.email.matches('.*@(alustudent|alueducation)[.]com');
+    }
+    function verified() {
+      return request.auth != null && request.auth.token.email_verified == true && aluEmail();
+    }
+    function isStaff() {
+      return verified() &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'staff';
+    }
+
+    match /users/{uid} {
+      // A user reads their own profile; staff can look up reporters of anonymous reports.
+      allow read: if request.auth != null && (request.auth.uid == uid || isStaff());
+      // Role follows the verified-domain convention: only an @alueducation.com account may create a
+      // staff profile; every other ALU account can only create a student profile.
+      allow create: if request.auth != null && aluEmail() && request.auth.uid == uid
+                    && (request.resource.data.role == 'student'
+                        || (request.resource.data.role == 'staff'
+                            && request.auth.token.email.matches('.*@alueducation[.]com')));
+      allow update: if request.auth != null && request.auth.uid == uid
+                    && request.resource.data.role == resource.data.role;
+    }
+
+    match /incidents/{id} {
+      allow read: if verified();
+      allow create: if verified()
+                    && request.resource.data.reporterId == request.auth.uid
+                    && request.resource.data.status == 'Submitted';
+      // Staff may change ONLY status, note, timestamp and status history.
+      allow update: if isStaff()
+                    && request.resource.data.diff(resource.data).affectedKeys()
+                         .hasOnly(['status', 'staffNote', 'updatedAt', 'statusHistory']);
+      allow delete: if isStaff()
+                    || (verified() && resource.data.reporterId == request.auth.uid
+                        && resource.data.status == 'Submitted');
+    }
+  }
+}
